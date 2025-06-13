@@ -1,57 +1,54 @@
+// index.js
+
+require('dotenv').config();
 const mqtt = require('mqtt');
 const admin = require('firebase-admin');
-const express = require('express');
-const app = express();
 
-// === Firebase via ENV variable (FIREBASE_KEY as JSON string) ===
-const firebasePrivate = JSON.parse(process.env.FIREBASE_KEY);
+// Load Firebase credentials from environment variable
+const serviceAccount = JSON.parse(process.env.FIREBASE_KEY);
 
 admin.initializeApp({
-  credential: admin.credential.cert(firebasePrivate),
-  databaseURL: "https://your-project-id.firebaseio.com"  // Ganti dengan URL Firebase kamu
+  credential: admin.credential.cert(serviceAccount),
+  databaseURL: process.env.FIREBASE_DB_URL,
 });
 
 const db = admin.database();
 
-// === MQTT SETUP ===
-const mqttClient = mqtt.connect('mqtt://mqtt.eclipseprojects.io');
+const mqttClient = mqtt.connect(process.env.MQTT_BROKER);
+const mqttTopic = process.env.MQTT_TOPIC || 'sensor/data';
 
 mqttClient.on('connect', () => {
-  console.log("✅ MQTT Connected");
-  mqttClient.subscribe('sensor/#');
+  console.log('Connected to MQTT broker');
+  mqttClient.subscribe(mqttTopic, (err) => {
+    if (err) console.error('Failed to subscribe:', err);
+    else console.log(`Subscribed to topic: ${mqttTopic}`);
+  });
 });
 
-// === HANDLE INCOMING MQTT DATA ===
 mqttClient.on('message', (topic, message) => {
-  const payload = message.toString();
-  const ref = db.ref("sensorData");
+  try {
+    const payload = message.toString().split(',');
+    const [arus, tegangan, durasi] = payload.map(parseFloat);
+    const timestamp = new Date().toISOString();
 
-  if (topic === 'sensor/tegangan') {
-    ref.child("tegangan").set(Number(payload));
-  } else if (topic === 'sensor/arus') {
-    ref.child("arus").set(Number(payload));
-  } else if (topic === 'sensor/waktu') {
-    ref.child("waktu").set(payload);
-  } else if (topic === 'sensor/energi') {
-    ref.child("energi").set(Number(payload));
+    const energi = arus * tegangan * (durasi / 3600); // Wh
+
+    const dataRef = db.ref('sensor_log').push();
+    dataRef.set({
+      timestamp,
+      arus,
+      tegangan,
+      durasi,
+      energi
+    });
+
+    console.log(`Data disimpan ke Firebase:
+  Arus: ${arus} A
+  Tegangan: ${tegangan} V
+  Durasi: ${durasi} s
+  Energi: ${energi.toFixed(4)} Wh`);
+
+  } catch (err) {
+    console.error('Error parsing or saving data:', err);
   }
-});
-
-// === LISTEN TO FIREBASE COMMANDS ===
-db.ref("perintah").on("value", snapshot => {
-  const cmd = snapshot.val();
-  if (cmd === "START" || cmd === "STOP") {
-    console.log("🔁 Kirim perintah ke MQTT:", cmd);
-    mqttClient.publish("sensor/control", cmd, { retain: true });
-  }
-});
-
-// === Express Web Server (opsional untuk status) ===
-app.get("/", (req, res) => {
-  res.send("🔥 MQTT to Firebase Middleware Aktif");
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🌐 Server berjalan di port ${PORT}`);
 });
